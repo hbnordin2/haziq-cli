@@ -1,0 +1,5 @@
+node_modules
+.DS_Store
+*.log
+# dist/cli.js is committed — npx github:hbnordin2/haziq-cli needs the built
+# artifact present in the repo.

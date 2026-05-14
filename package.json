@@ -1,0 +1,33 @@
+{
+  "name": "haziq",
+  "version": "0.1.0",
+  "description": "CLI for reading and commenting on haziqnordin.com from Claude Code / Codex.",
+  "type": "module",
+  "bin": {
+    "haziq": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "bun run build.ts",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bun run build.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hbnordin2/haziq-cli.git"
+  },
+  "homepage": "https://github.com/hbnordin2/haziq-cli",
+  "bugs": "https://github.com/hbnordin2/haziq-cli/issues",
+  "license": "MIT",
+  "author": "Haziq Nordin <hbnordin2@gmail.com>",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}
