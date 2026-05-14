@@ -311,6 +311,238 @@ async function apiJson(path, init = {}) {
   return body;
 }
 
+// src/html-to-md.ts
+var ENTITIES = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+  mdash: "—",
+  ndash: "–",
+  hellip: "…",
+  rsquo: "’",
+  lsquo: "‘",
+  rdquo: "”",
+  ldquo: "“"
+};
+function decodeEntities(s) {
+  return s.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (full, ref) => {
+    if (ref.startsWith("#")) {
+      const hex = ref[1] === "x" || ref[1] === "X";
+      const num = parseInt(ref.slice(hex ? 2 : 1), hex ? 16 : 10);
+      if (Number.isFinite(num))
+        return String.fromCodePoint(num);
+      return full;
+    }
+    return ENTITIES[ref.toLowerCase()] ?? full;
+  });
+}
+function plainText(html) {
+  return decodeEntities(html.replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim();
+}
+function inlineMd(html) {
+  let s = html;
+  s = s.replace(/<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_, href, text) => `[${plainText(text)}](${href})`);
+  s = s.replace(/<br\s*\/?>/gi, `
+`);
+  s = s.replace(/<(?:strong|b)\b[^>]*>([\s\S]*?)<\/(?:strong|b)>/gi, (_, t) => `**${plainText(t)}**`);
+  s = s.replace(/<(?:em|i)\b[^>]*>([\s\S]*?)<\/(?:em|i)>/gi, (_, t) => `*${plainText(t)}*`);
+  s = s.replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_, t) => `\`${plainText(t)}\``);
+  s = s.replace(/<[^>]+>/g, "");
+  s = decodeEntities(s);
+  s = s.replace(/[ \t]+/g, " ");
+  return s.trim();
+}
+var DROP_BLOCKS = [
+  { open: /<script\b[^>]*>/i, close: "</script>" },
+  { open: /<style\b[^>]*>/i, close: "</style>" },
+  { open: /<noscript\b[^>]*>/i, close: "</noscript>" },
+  { open: /<aside\b[^>]*class=["'][^"']*\bread-with-ai\b[^"']*["'][^>]*>/i, close: "</aside>" },
+  { open: /<footer\b[^>]*class=["'][^"']*\bessay-share\b[^"']*["'][^>]*>/i, close: "</footer>" }
+];
+function stripNoise(html) {
+  let s = html;
+  s = s.replace(/<!--[\s\S]*?-->/g, "");
+  for (const { open, close } of DROP_BLOCKS) {
+    while (true) {
+      const m = open.exec(s);
+      if (!m)
+        break;
+      const end = s.toLowerCase().indexOf(close, m.index + m[0].length);
+      if (end === -1)
+        break;
+      s = s.slice(0, m.index) + s.slice(end + close.length);
+    }
+  }
+  return s;
+}
+function nextBlock(html, i) {
+  const blockRe = /<(h[1-6]|p|ul|ol|blockquote|pre|hr|figure|figcaption|img|article|section|div|header|main|aside|footer)\b([^>]*)>/gi;
+  blockRe.lastIndex = i;
+  const m = blockRe.exec(html);
+  if (!m)
+    return null;
+  const tag = m[1].toLowerCase();
+  const attrs = m[2] ?? "";
+  const open = m.index;
+  const afterOpen = open + m[0].length;
+  if (tag === "hr" || tag === "img") {
+    return { start: open, end: afterOpen, tag, attrs, text: "" };
+  }
+  const close = `</${tag}>`;
+  let depth = 1;
+  let scan = afterOpen;
+  while (depth > 0) {
+    const lowered = html.toLowerCase();
+    const nextOpen = lowered.indexOf(`<${tag}`, scan);
+    const nextClose = lowered.indexOf(close, scan);
+    if (nextClose === -1)
+      return null;
+    if (nextOpen !== -1 && nextOpen < nextClose) {
+      depth++;
+      scan = nextOpen + tag.length + 1;
+    } else {
+      depth--;
+      scan = nextClose + close.length;
+      if (depth === 0) {
+        return {
+          start: open,
+          end: scan,
+          tag,
+          attrs,
+          text: html.slice(afterOpen, nextClose)
+        };
+      }
+    }
+  }
+  return null;
+}
+function attrValue(attrs, name) {
+  const re = new RegExp(`\\b${name}=["']([^"']*)["']`, "i");
+  const m = re.exec(attrs);
+  return m ? m[1] : null;
+}
+function emitList(html, ordered) {
+  const items = [];
+  const liRe = /<li\b[^>]*>([\s\S]*?)<\/li>/gi;
+  let m;
+  let n = 1;
+  while ((m = liRe.exec(html)) !== null) {
+    const inner = inlineMd(m[1]).replace(/\n/g, " ");
+    const marker = ordered ? `${n}.` : "-";
+    items.push(`${marker} ${inner}`);
+    n++;
+  }
+  return items.join(`
+`);
+}
+function emitCodeBlock(html) {
+  const codeMatch = /<code\b[^>]*>([\s\S]*?)<\/code>/i.exec(html);
+  const raw = codeMatch ? codeMatch[1] : html;
+  const text = decodeEntities(raw.replace(/<[^>]+>/g, ""));
+  return "```\n" + text.replace(/\n+$/, "") + "\n```";
+}
+function emitBlock(b) {
+  const { tag, attrs, text } = b;
+  switch (tag) {
+    case "h1":
+    case "h2":
+    case "h3":
+    case "h4":
+    case "h5":
+    case "h6": {
+      const level = Number(tag[1]);
+      return `${"#".repeat(level)} ${plainText(text)}`;
+    }
+    case "p": {
+      const md = inlineMd(text);
+      return md.length ? md : null;
+    }
+    case "ul":
+      return emitList(text, false);
+    case "ol":
+      return emitList(text, true);
+    case "blockquote": {
+      const inner = walk(text).trim();
+      if (!inner)
+        return null;
+      return inner.split(`
+`).map((line) => line.length ? `> ${line}` : ">").join(`
+`);
+    }
+    case "pre":
+      return emitCodeBlock(text);
+    case "hr":
+      return "---";
+    case "img": {
+      const alt = attrValue(attrs, "alt") ?? "";
+      const src = attrValue(attrs, "src") ?? "";
+      if (!src)
+        return null;
+      return `![${alt}](${src})`;
+    }
+    case "figure": {
+      const inner = walk(text).trim();
+      return inner.length ? inner : null;
+    }
+    case "figcaption": {
+      const md = inlineMd(text);
+      return md.length ? `*${md}*` : null;
+    }
+    case "article":
+    case "section":
+    case "div":
+    case "header":
+    case "main":
+    case "aside":
+    case "footer": {
+      const stripped = text.replace(/\s+/g, "");
+      if (!stripped)
+        return null;
+      const inner = walk(text).trim();
+      return inner.length ? inner : null;
+    }
+    default:
+      return null;
+  }
+}
+function walk(html) {
+  const out = [];
+  let i = 0;
+  while (i < html.length) {
+    const block = nextBlock(html, i);
+    if (!block) {
+      const tail = inlineMd(html.slice(i));
+      if (tail.length)
+        out.push(tail);
+      break;
+    }
+    if (block.start > i) {
+      const between = inlineMd(html.slice(i, block.start));
+      if (between.length)
+        out.push(between);
+    }
+    const md = emitBlock(block);
+    if (md != null && md.length)
+      out.push(md);
+    i = block.end;
+  }
+  return out.join(`
+
+`);
+}
+function htmlToMarkdown(html) {
+  const cleaned = stripNoise(html);
+  const md = walk(cleaned);
+  return md.split(`
+`).map((line) => line.replace(/[ \t]+$/, "")).join(`
+`).replace(/\n{3,}/g, `
+
+`).trim();
+}
+
 // src/commands/read.ts
 function normalizeSlug(input) {
   let s = input.trim();
@@ -325,9 +557,21 @@ function normalizeSlug(input) {
   return s;
 }
 async function read(args) {
-  const slugArg = args[0];
+  let slugArg = null;
+  let raw = false;
+  for (const a of args) {
+    if (a === "--html" || a === "--raw")
+      raw = true;
+    else if (a.startsWith("--")) {
+      console.error(`Unknown flag: ${a}`);
+      process.exitCode = 2;
+      return;
+    } else if (!slugArg) {
+      slugArg = a;
+    }
+  }
   if (!slugArg) {
-    console.error("Usage: haziq read <slug|url>");
+    console.error("Usage: haziq read <slug|url> [--html]");
     process.exitCode = 2;
     return;
   }
@@ -346,9 +590,10 @@ async function read(args) {
     ""
   ].join(`
 `);
+  const body = raw ? detail.body_html : htmlToMarkdown(detail.body_html);
   process.stdout.write(fm);
-  process.stdout.write(detail.body_html);
-  if (!detail.body_html.endsWith(`
+  process.stdout.write(body);
+  if (!body.endsWith(`
 `))
     process.stdout.write(`
 `);
